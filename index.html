@@ -24,13 +24,13 @@
 
   <div class="row">
     <div>
-      <canvas id="map" width="900" height="600" aria-label="Building map canvas"></canvas>
+      <canvas id="map" width="900" height="600" aria-label="SVVSD map canvas"></canvas>
     </div>
 
     <div class="panel">
       <label>
-        Floorplan image file (default: floorplan.png)
-        <input id="imgPath" value="floorplan.png" />
+        Floorplan image file (default: SVVSDMap.png)
+        <input id="imgPath" value="SVVSDMap.png" />
       </label>
       <button id="loadImg">Load / Reload floorplan</button>
 
@@ -294,14 +294,14 @@
 
   // image load
   document.getElementById("loadImg").addEventListener("click", () => {
-    const path = document.getElementById("imgPath").value.trim() || "floorplan.png";
+    const path = document.getElementById("imgPath").value.trim() || "SVVSDMap.png";
     img.src = path + (path.includes("?") ? "&" : "?") + "v=" + Date.now();
   });
   img.onload = () => draw();
   img.onerror = () => draw();
 
   // initial draw
-  img.src = "floorplan.png";
+  img.src = "SVVSDMap.png";
   draw();
 })();
 </script>
