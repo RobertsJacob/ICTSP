@@ -7,20 +7,24 @@
   <style>
     body { font-family: system-ui, Arial, sans-serif; margin: 16px; }
     .row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
-    .panel { min-width: 280px; max-width: 360px; }
-    button, input { padding: 8px 10px; margin: 4px 0; width: 100%; }
-    textarea { width: 100%; height: 160px; }
+    .panel { min-width: 300px; max-width: 380px; }
+    button, input, select { padding: 8px 10px; margin: 4px 0; width: 100%; box-sizing: border-box; }
+    textarea { width: 100%; height: 160px; box-sizing: border-box; }
     canvas { border: 1px solid #ccc; border-radius: 8px; }
     small { color: #444; display: block; line-height: 1.35; }
-    .stat { padding: 8px 10px; background: #f5f5f5; border-radius: 8px; margin-top: 8px; }
+    .stat { padding: 10px 12px; background: #f5f5f5; border-radius: 8px; margin-top: 8px; }
     .hint { font-size: 12px; color: #555; margin-top: 6px; }
+    .sectionTitle { margin-top: 12px; font-weight: 700; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; background:#eee; font-size: 12px; }
   </style>
 </head>
 <body>
-  <h2>TSP: Building Route Solver (Greedy + 2-opt + Random + Brute Force)</h2>
+  <h2>TSP: Building Route Solver (Classical + Quantum-Inspired)</h2>
   <small>
     Click to add a location. Drag a location to move it. Set a start node, then solve.
-    Distances are computed in pixels and converted to miles using a calibrated scale.
+    We visualize both <b>connections (edges)</b> and <b>route complexity (number of tours)</b> so students can see why TSP explodes.
   </small>
 
   <div class="row">
@@ -40,12 +44,54 @@
         <input id="startIndex" type="number" value="0" min="0" />
       </label>
 
-      <button id="toggleGraph">Toggle: Show all connections (complete graph)</button>
+      <div class="grid2">
+        <button id="toggleGraph">Toggle: Show all connections</button>
+        <button id="toggleComplexity">Toggle: Show route complexity</button>
+      </div>
 
-      <button id="solveGreedy">Solve: Greedy Nearest Neighbor</button>
-      <button id="randomRoute">Make: Random Route</button>
-      <button id="improve2opt">Improve: 2-opt (20 passes)</button>
-      <button id="bruteForce">Solve: Brute Force (Optimal, small N)</button>
+      <div class="sectionTitle">Classical</div>
+      <button id="solveGreedy">Solve: Greedy (instant)</button>
+      <button id="solveGreedyAnim">Solve: Greedy (animated)</button>
+
+      <div class="grid2">
+        <button id="randomRoute">Make: Random Route</button>
+        <button id="improve2opt">Improve: 2-opt (20 passes)</button>
+      </div>
+
+      <button id="bruteForce">Solve: Brute Force (optimal, small N)</button>
+      <button id="bruteForceAnim">Solve: Brute Force (animated best-so-far)</button>
+
+      <div class="sectionTitle">Quantum-inspired (honest stand-in)</div>
+      <div class="hint">
+        This is <b>not</b> a real quantum computer. It models the optimization framing: energy (distance), probabilistic moves, and sampling.
+      </div>
+
+      <button id="annealAnim">Simulated Annealing (animated)</button>
+      <button id="annealSample">Sampling Mode: Best of 50 runs</button>
+
+      <div class="grid2">
+        <label>
+          Iterations
+          <input id="annealIters" type="number" value="2500" min="100" step="100" />
+        </label>
+        <label>
+          Delay (ms, anim)
+          <input id="animDelay" type="number" value="20" min="0" step="5" />
+        </label>
+      </div>
+
+      <div class="grid2">
+        <label>
+          Start Temp (T0)
+          <input id="annealT0" type="number" value="60" min="1" step="1" />
+        </label>
+        <label>
+          Cooling (0.90–0.999)
+          <input id="annealCooling" type="number" value="0.995" min="0.90" max="0.999" step="0.001" />
+        </label>
+      </div>
+
+      <button id="stopRun">Stop / Cancel Running Solver</button>
 
       <button id="clearRoute">Clear Route (keep points)</button>
       <button id="resetAll">Reset All</button>
@@ -58,9 +104,8 @@
       <button id="import">Import JSON</button>
       <textarea id="jsonBox" placeholder='{"points":[{"name":"A","x":100,"y":120}, ...]}'></textarea>
 
-      <small>
-        Tip: Rename nodes by editing JSON (name field). “Show all connections” is great for teaching
-        how quickly the number of edges grows as you add points.
+      <small class="hint">
+        Teaching move: toggle “route complexity” and add points one-by-one. Students will watch tours explode factorially.
       </small>
     </div>
   </div>
@@ -82,6 +127,11 @@
   let route = null;        // array of indices e.g. [0,3,2,1,0]
   let draggingIndex = -1;
   let showCompleteGraph = false;
+  let showComplexityOverlay = true;
+
+  // Running / cancel control
+  let isRunning = false;
+  let cancelToken = 0;
 
   // ---------- Helpers ----------
   const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -93,6 +143,10 @@
       total += dist(points[routeIdxs[i]], points[routeIdxs[i+1]]);
     }
     return total;
+  }
+
+  function sleep(ms) {
+    return new Promise(res => setTimeout(res, ms));
   }
 
   function setStatus(msg) {
@@ -108,6 +162,47 @@
     v = Math.max(0, Math.min(n - 1, v));
     input.value = v;
     return v;
+  }
+
+  function formatSci(n) {
+    if (!isFinite(n) || n <= 0) return String(n);
+    const exp = Math.floor(Math.log10(n));
+    const mant = n / Math.pow(10, exp);
+    if (exp < 6) return n.toLocaleString();
+    return `${mant.toFixed(3)} × 10^${exp}`;
+  }
+
+  // factorial grows huge fast; we return scientific notation via log10
+  function factorialLog10(k) {
+    if (k < 2) return 0;
+    let s = 0;
+    for (let i = 2; i <= k; i++) s += Math.log10(i);
+    return s;
+  }
+
+  function formatFactorial(k) {
+    // approximate (k!) using log10
+    if (k < 2) return "1";
+    const log10v = factorialLog10(k);
+    const exp = Math.floor(log10v);
+    const mant = Math.pow(10, log10v - exp);
+    if (exp < 6) {
+      // safe-ish exact for small k
+      let v = 1;
+      for (let i = 2; i <= k; i++) v *= i;
+      return v.toLocaleString();
+    }
+    return `${mant.toFixed(3)} × 10^${exp}`;
+  }
+
+  function edgesCount(n) {
+    return (n * (n - 1)) / 2;
+  }
+
+  function toursCountApprox(n) {
+    // Fix start node -> (n-1)! possible tours
+    // Return formatted string
+    return formatFactorial(Math.max(0, n - 1));
   }
 
   function drawCompleteGraph() {
@@ -141,6 +236,32 @@
     ctx.stroke();
   }
 
+  function drawComplexityOverlay() {
+    if (!showComplexityOverlay) return;
+    const n = points.length;
+    const edges = edgesCount(n);
+    const tours = toursCountApprox(n);
+
+    const boxX = 14, boxY = 14, boxW = 420, boxH = 88;
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.fillRect(boxX, boxY, boxW, boxH);
+    ctx.strokeStyle = "rgba(0,0,0,0.15)";
+    ctx.strokeRect(boxX, boxY, boxW, boxH);
+
+    ctx.fillStyle = "rgba(0,0,0,0.85)";
+    ctx.font = "14px system-ui, Arial";
+    ctx.fillText(`Points (n): ${n}`, boxX + 12, boxY + 24);
+
+    ctx.font = "13px system-ui, Arial";
+    ctx.fillText(`Connections (edges): n(n−1)/2 = ${edges.toLocaleString()}  (quadratic)`, boxX + 12, boxY + 46);
+
+    ctx.fillText(`Possible tours (fix start): (n−1)! ≈ ${tours}  (factorial explosion)`, boxX + 12, boxY + 68);
+
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.font = "12px system-ui, Arial";
+    ctx.fillText(`This is why brute force dies fast: edges grow ~n² but tours grow ~(n−1)!`, boxX + 12, boxY + 86);
+  }
+
   function draw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -153,13 +274,9 @@
       ctx.fillText("No floorplan loaded (set image path and click Load)", 16, 24);
     }
 
-    // Optional complete graph behind everything
     if (showCompleteGraph) drawCompleteGraph();
-
-    // Route on top of the graph lines
     drawRoute();
 
-    // Points
     const start = clampStartIndex();
     points.forEach((p, i) => {
       ctx.beginPath();
@@ -179,10 +296,11 @@
       ctx.fillText(p.name ?? `Room ${i}`, p.x + 14, p.y - 12);
     });
 
+    drawComplexityOverlay();
     updateStats();
   }
 
-  function updateStats() {
+  function updateStats(extra = {}) {
     const el = document.getElementById("stats");
     if (!route) {
       el.innerHTML = `Route: —<br/>Distance: —`;
@@ -192,15 +310,47 @@
     const pxDistance = routeLength(route);
     const miles = pxDistance * MILES_PER_PIXEL;
 
+    const metaParts = [];
+    if (extra.mode) metaParts.push(`<span class="pill">${extra.mode}</span>`);
+    if (typeof extra.evaluated === "number") metaParts.push(`<span class="pill">states: ${extra.evaluated.toLocaleString()}</span>`);
+    if (typeof extra.total === "number") metaParts.push(`<span class="pill">of: ${extra.total.toLocaleString()}</span>`);
+
+    const meta = metaParts.length ? `<div style="margin-top:6px">${metaParts.join(" ")}</div>` : "";
+
     el.innerHTML = `
       Route:<br/>
       <small>${names}</small><br/>
       Distance: <strong>${miles.toFixed(2)} miles</strong>
       <br/><small>(${pxDistance.toFixed(1)} px)</small>
+      ${meta}
     `;
   }
 
-  // ---------- Solvers ----------
+  function ensureNotRunning() {
+    if (isRunning) {
+      setStatus("A solver is already running. Press Stop/Cancel first.");
+      return false;
+    }
+    return true;
+  }
+
+  function beginRun(msg) {
+    isRunning = true;
+    cancelToken++;
+    setStatus(msg || "Running...");
+    return cancelToken;
+  }
+
+  function endRun(msg) {
+    isRunning = false;
+    setStatus(msg || "");
+  }
+
+  function wasCancelled(token) {
+    return token !== cancelToken;
+  }
+
+  // ---------- Classical Solvers ----------
   function nearestNeighbor(startIdx) {
     const n = points.length;
     if (n === 0) return null;
@@ -228,9 +378,50 @@
     return r;
   }
 
+  async function nearestNeighborAnimated(startIdx, delayMs, token) {
+    const n = points.length;
+    if (n === 0) return null;
+
+    const visited = Array(n).fill(false);
+    const r = [startIdx];
+    visited[startIdx] = true;
+
+    setStatus("Greedy (animated): picking the nearest unvisited next stop...");
+    route = r.slice();
+    draw();
+
+    for (let step = 1; step < n; step++) {
+      if (wasCancelled(token)) return null;
+
+      const last = r[r.length - 1];
+      let best = -1;
+      let bestD = Infinity;
+
+      for (let i = 0; i < n; i++) {
+        if (!visited[i]) {
+          const d = dist(points[last], points[i]);
+          if (d < bestD) { bestD = d; best = i; }
+        }
+      }
+
+      visited[best] = true;
+      r.push(best);
+      route = r.slice();
+      updateStats({ mode: "Greedy (animated)", evaluated: step });
+      draw();
+      if (delayMs > 0) await sleep(delayMs);
+    }
+
+    r.push(startIdx);
+    route = r.slice();
+    updateStats({ mode: "Greedy (animated)" });
+    draw();
+    return r;
+  }
+
   // 2-opt improvement for a cycle route
   function twoOptImprove(r, passes = 20) {
-    if (!r || r.length < 5) return { route: r, improved: false, delta: 0 };
+    if (!r || r.length < 5) return { route: r, improved: false };
 
     let best = r.slice();
     let bestLen = routeLength(best);
@@ -258,8 +449,7 @@
       if (!improvedThisPass) break;
     }
 
-    const originalLen = routeLength(r);
-    return { route: best, improved: improvedAny, delta: originalLen - bestLen };
+    return { route: best, improved: improvedAny };
   }
 
   function makeRandomRoute(startIdx) {
@@ -275,11 +465,33 @@
       [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
     }
 
-    const r = [startIdx, ...remaining, startIdx];
-    return r;
+    return [startIdx, ...remaining, startIdx];
   }
 
-  // Brute force optimal (fix start index, permute the rest)
+  // Generator: Heap's algorithm permutations
+  function* heapPermutations(arr) {
+    const a = arr.slice();
+    const n = a.length;
+    const c = new Array(n).fill(0);
+    yield a.slice();
+    let i = 0;
+    while (i < n) {
+      if (c[i] < i) {
+        if (i % 2 === 0) {
+          [a[0], a[i]] = [a[i], a[0]];
+        } else {
+          [a[c[i]], a[i]] = [a[i], a[c[i]]];
+        }
+        yield a.slice();
+        c[i] += 1;
+        i = 0;
+      } else {
+        c[i] = 0;
+        i += 1;
+      }
+    }
+  }
+
   function bruteForceOptimal(startIdx) {
     const n = points.length;
     if (n < 2) return null;
@@ -290,33 +502,179 @@
     let bestRoute = null;
     let bestLen = Infinity;
 
-    // Heap's algorithm for permutations (iterative-ish recursion)
-    function permute(a, k) {
-      if (k === 1) {
-        const candidate = [startIdx, ...a, startIdx];
-        const len = routeLength(candidate);
-        if (len < bestLen) {
-          bestLen = len;
-          bestRoute = candidate;
-        }
-        return;
-      }
-      permute(a, k - 1);
-      for (let i = 0; i < k - 1; i++) {
-        if (k % 2 === 0) {
-          [a[i], a[k - 1]] = [a[k - 1], a[i]];
-        } else {
-          [a[0], a[k - 1]] = [a[k - 1], a[0]];
-        }
-        permute(a, k - 1);
+    for (const perm of heapPermutations(nodes)) {
+      const candidate = [startIdx, ...perm, startIdx];
+      const len = routeLength(candidate);
+      if (len < bestLen) {
+        bestLen = len;
+        bestRoute = candidate;
       }
     }
 
-    permute(nodes.slice(), nodes.length);
     return bestRoute;
   }
 
-  // ---------- Events ----------
+  async function bruteForceAnimated(startIdx, delayMs, token) {
+    const n = points.length;
+    const m = n - 1;
+    if (n < 2) return null;
+
+    // total perms = (n-1)!
+    // (might be huge; we cap n elsewhere)
+    let totalPermsExact = 1;
+    for (let i = 2; i <= m; i++) totalPermsExact *= i;
+
+    const nodes = [];
+    for (let i = 0; i < n; i++) if (i !== startIdx) nodes.push(i);
+
+    let bestRoute = null;
+    let bestLen = Infinity;
+    let evaluated = 0;
+
+    setStatus(`Brute force (animated): testing ${(n-1)}! = ${formatFactorial(m)} tours...`);
+    const permGen = heapPermutations(nodes);
+
+    // process in batches so UI stays responsive
+    const BATCH = 300;
+
+    while (true) {
+      if (wasCancelled(token)) return null;
+
+      let didAny = false;
+      for (let b = 0; b < BATCH; b++) {
+        const next = permGen.next();
+        if (next.done) {
+          endRun("Brute force (animated) complete: optimal route found.");
+          route = bestRoute;
+          updateStats({ mode: "Brute Force (animated)", evaluated, total: totalPermsExact });
+          draw();
+          return bestRoute;
+        }
+
+        didAny = true;
+        evaluated++;
+        const perm = next.value;
+        const candidate = [startIdx, ...perm, startIdx];
+        const len = routeLength(candidate);
+
+        if (len < bestLen) {
+          bestLen = len;
+          bestRoute = candidate;
+          route = bestRoute;
+        }
+      }
+
+      if (didAny) {
+        updateStats({ mode: "Brute Force (animated)", evaluated, total: totalPermsExact });
+        draw();
+      }
+
+      if (delayMs > 0) await sleep(delayMs);
+      else await sleep(0);
+    }
+  }
+
+  // ---------- Quantum-inspired: Simulated Annealing ----------
+  // Move: swap two positions (excluding start/end)
+  function proposeSwap(current, startIdx) {
+    // current includes start at [0] and end at [last] = startIdx
+    const len = current.length;
+    if (len <= 4) return current.slice(); // too small to matter
+
+    // pick two indices in [1, len-2]
+    const i = 1 + Math.floor(Math.random() * (len - 2));
+    let k = 1 + Math.floor(Math.random() * (len - 2));
+    while (k === i) k = 1 + Math.floor(Math.random() * (len - 2));
+
+    const next = current.slice();
+    [next[i], next[k]] = [next[k], next[i]];
+    return next;
+  }
+
+  function annealOnce(startIdx, iters, T0, cooling) {
+    // start from random
+    let current = makeRandomRoute(startIdx);
+    let currentLen = routeLength(current);
+
+    let best = current.slice();
+    let bestLen = currentLen;
+
+    let T = T0;
+
+    for (let t = 0; t < iters; t++) {
+      const cand = proposeSwap(current, startIdx);
+      const candLen = routeLength(cand);
+      const delta = candLen - currentLen;
+
+      // accept if better, or sometimes accept worse early (temperature)
+      if (delta <= 0 || Math.random() < Math.exp(-delta / Math.max(1e-9, T))) {
+        current = cand;
+        currentLen = candLen;
+        if (currentLen < bestLen) {
+          best = current.slice();
+          bestLen = currentLen;
+        }
+      }
+
+      T *= cooling;
+      if (T < 1e-6) T = 1e-6;
+    }
+
+    return { best, bestLen };
+  }
+
+  async function annealAnimated(startIdx, iters, T0, cooling, delayMs, token) {
+    let current = makeRandomRoute(startIdx);
+    let currentLen = routeLength(current);
+
+    let best = current.slice();
+    let bestLen = currentLen;
+
+    let T = T0;
+
+    setStatus("Simulated Annealing (animated): exploring routes with probabilistic moves...");
+    route = current.slice();
+    updateStats({ mode: "Annealing (animated)", evaluated: 0 });
+    draw();
+
+    // Update UI every 'stride' iterations for speed
+    const stride = 25;
+
+    for (let t = 0; t < iters; t++) {
+      if (wasCancelled(token)) return null;
+
+      const cand = proposeSwap(current, startIdx);
+      const candLen = routeLength(cand);
+      const delta = candLen - currentLen;
+
+      if (delta <= 0 || Math.random() < Math.exp(-delta / Math.max(1e-9, T))) {
+        current = cand;
+        currentLen = candLen;
+        if (currentLen < bestLen) {
+          best = current.slice();
+          bestLen = currentLen;
+        }
+      }
+
+      T *= cooling;
+      if (T < 1e-6) T = 1e-6;
+
+      if (t % stride === 0 || t === iters - 1) {
+        route = best.slice(); // show best-so-far
+        updateStats({ mode: "Annealing (animated)", evaluated: t + 1 });
+        draw();
+        if (delayMs > 0) await sleep(delayMs);
+        else await sleep(0);
+      }
+    }
+
+    route = best.slice();
+    updateStats({ mode: "Annealing (animated)", evaluated: iters });
+    draw();
+    return best;
+  }
+
+  // ---------- UI Events ----------
   function getMousePos(evt) {
     const rect = canvas.getBoundingClientRect();
     return {
@@ -356,33 +714,52 @@
   document.getElementById("toggleGraph").addEventListener("click", () => {
     showCompleteGraph = !showCompleteGraph;
     const n = points.length;
-    const edges = (n * (n - 1)) / 2;
+    const edges = edgesCount(n);
     setStatus(showCompleteGraph
-      ? `Complete graph ON. With ${n} points, that’s ${edges} connections.`
-      : "Complete graph OFF."
+      ? `Connections ON. With ${n} points: edges = n(n−1)/2 = ${edges.toLocaleString()} (quadratic).`
+      : "Connections OFF."
     );
     draw();
   });
 
+  document.getElementById("toggleComplexity").addEventListener("click", () => {
+    showComplexityOverlay = !showComplexityOverlay;
+    setStatus(showComplexityOverlay ? "Route complexity overlay ON." : "Route complexity overlay OFF.");
+    draw();
+  });
+
   document.getElementById("solveGreedy").addEventListener("click", () => {
+    if (!ensureNotRunning()) return;
     const start = clampStartIndex();
     route = nearestNeighbor(start);
-    setStatus("Greedy route created. Try 2-opt to remove crossings / shorten it.");
+    setStatus("Greedy created. Try 2-opt to remove crossings / shorten. Or compare vs brute force (small N).");
+    updateStats({ mode: "Greedy" });
+    draw();
+  });
+
+  document.getElementById("solveGreedyAnim").addEventListener("click", async () => {
+    if (!ensureNotRunning()) return;
+    const start = clampStartIndex();
+    const delayMs = Math.max(0, parseInt(document.getElementById("animDelay").value || "0", 10));
+    const token = beginRun("Greedy (animated) running...");
+    await nearestNeighborAnimated(start, delayMs, token);
+    if (!wasCancelled(token)) endRun("Greedy (animated) complete.");
     draw();
   });
 
   document.getElementById("randomRoute").addEventListener("click", () => {
+    if (!ensureNotRunning()) return;
     const start = clampStartIndex();
     route = makeRandomRoute(start);
-    setStatus("Random route created. Try 2-opt or Greedy to compare improvement.");
+    setStatus("Random route created. Try 2-opt or annealing to improve.");
+    updateStats({ mode: "Random" });
     draw();
   });
 
   document.getElementById("improve2opt").addEventListener("click", () => {
-    if (!route) {
-      setStatus("No route yet. Create one with Greedy or Random first.");
-      return;
-    }
+    if (!ensureNotRunning()) return;
+    if (!route) { setStatus("No route yet. Create one with Greedy or Random first."); return; }
+
     const before = routeLength(route);
     const result = twoOptImprove(route, 20);
     route = result.route;
@@ -393,41 +770,131 @@
     } else {
       const savedPx = before - after;
       const savedMiles = savedPx * MILES_PER_PIXEL;
-      setStatus(`2-opt improved the route! Saved ${savedMiles.toFixed(2)} miles (${savedPx.toFixed(1)} px).`);
+      setStatus(`2-opt improved route: saved ${savedMiles.toFixed(2)} miles (${savedPx.toFixed(1)} px).`);
     }
+    updateStats({ mode: "2-opt" });
     draw();
   });
 
   document.getElementById("bruteForce").addEventListener("click", () => {
+    if (!ensureNotRunning()) return;
     const n = points.length;
     if (n === 0) return;
 
     if (n > BRUTE_FORCE_MAX_N) {
-      setStatus(`Brute force blocked: ${n} points is too many. Limit is ${BRUTE_FORCE_MAX_N}. (Factorial blow-up)`);
+      setStatus(`Brute force blocked: ${n} points is too many. Limit is ${BRUTE_FORCE_MAX_N}. (Tours: (n−1)! explodes.)`);
       return;
     }
 
     const start = clampStartIndex();
-    setStatus(`Brute forcing optimal route for ${n} points...`);
-    // Give the browser a beat to paint status text before heavy work
-    setTimeout(() => {
-      const best = bruteForceOptimal(start);
-      route = best;
-      setStatus(`Brute force complete: optimal route found for ${n} points. Compare vs Greedy/2-opt.`);
-      draw();
-    }, 10);
+    setStatus(`Brute forcing optimal route for ${n} points (tours ≈ ${(n-1)}! = ${formatFactorial(n-1)})...`);
+    const best = bruteForceOptimal(start);
+    route = best;
+    setStatus(`Brute force complete: optimal route found for ${n} points. Compare vs Greedy / 2-opt / Annealing.`);
+    updateStats({ mode: "Brute Force" });
+    draw();
+  });
+
+  document.getElementById("bruteForceAnim").addEventListener("click", async () => {
+    if (!ensureNotRunning()) return;
+    const n = points.length;
+    if (n === 0) return;
+
+    if (n > BRUTE_FORCE_MAX_N) {
+      setStatus(`Brute force animated blocked: ${n} points is too many. Limit is ${BRUTE_FORCE_MAX_N}.`);
+      return;
+    }
+
+    const start = clampStartIndex();
+    const delayMs = Math.max(0, parseInt(document.getElementById("animDelay").value || "0", 10));
+    const token = beginRun("Brute force (animated) running...");
+    await bruteForceAnimated(start, delayMs, token);
+    if (!wasCancelled(token)) endRun("Brute force (animated) complete.");
+    draw();
+  });
+
+  document.getElementById("annealAnim").addEventListener("click", async () => {
+    if (!ensureNotRunning()) return;
+    const n = points.length;
+    if (n < 3) { setStatus("Add at least 3 points to see annealing behave interestingly."); return; }
+
+    const start = clampStartIndex();
+    const iters = Math.max(100, parseInt(document.getElementById("annealIters").value || "2500", 10));
+    const delayMs = Math.max(0, parseInt(document.getElementById("animDelay").value || "0", 10));
+    const T0 = Math.max(1, parseFloat(document.getElementById("annealT0").value || "60"));
+    const cooling = Math.min(0.999, Math.max(0.90, parseFloat(document.getElementById("annealCooling").value || "0.995")));
+
+    const token = beginRun("Annealing (animated) running...");
+    await annealAnimated(start, iters, T0, cooling, delayMs, token);
+    if (!wasCancelled(token)) endRun("Annealing (animated) complete. Best-so-far route shown.");
+    draw();
+  });
+
+  document.getElementById("annealSample").addEventListener("click", async () => {
+    if (!ensureNotRunning()) return;
+    const n = points.length;
+    if (n < 3) { setStatus("Add at least 3 points to see sampling behave interestingly."); return; }
+
+    const start = clampStartIndex();
+    const iters = Math.max(200, parseInt(document.getElementById("annealIters").value || "2500", 10));
+    const T0 = Math.max(1, parseFloat(document.getElementById("annealT0").value || "60"));
+    const cooling = Math.min(0.999, Math.max(0.90, parseFloat(document.getElementById("annealCooling").value || "0.995")));
+
+    const runs = 50;
+    const token = beginRun(`Sampling mode: running ${runs} anneals (best-of-${runs})...`);
+
+    // let UI paint
+    await sleep(10);
+
+    let bestRoute = null;
+    let bestLen = Infinity;
+
+    for (let r = 0; r < runs; r++) {
+      if (wasCancelled(token)) return;
+      const out = annealOnce(start, iters, T0, cooling);
+      if (out.bestLen < bestLen) {
+        bestLen = out.bestLen;
+        bestRoute = out.best;
+      }
+      if ((r + 1) % 10 === 0) {
+        route = bestRoute ? bestRoute.slice() : null;
+        updateStats({ mode: "Annealing (samples)", evaluated: (r + 1) });
+        setStatus(`Sampling mode: completed ${r + 1}/${runs} runs. Best distance so far shown.`);
+        draw();
+        await sleep(0);
+      }
+    }
+
+    route = bestRoute;
+    updateStats({ mode: "Annealing (samples)", evaluated: runs });
+    endRun(`Sampling complete: best-of-${runs} route shown.`);
+    draw();
+  });
+
+  document.getElementById("stopRun").addEventListener("click", () => {
+    if (!isRunning) {
+      setStatus("Nothing is currently running.");
+      return;
+    }
+    cancelToken++; // invalidate current token
+    isRunning = false;
+    setStatus("Cancelled. (You can run another solver now.)");
   });
 
   document.getElementById("clearRoute").addEventListener("click", () => {
+    if (isRunning) { setStatus("Stop the running solver first."); return; }
     route = null;
     setStatus("Route cleared (points kept).");
     draw();
   });
 
   document.getElementById("resetAll").addEventListener("click", () => {
+    cancelToken++;
+    isRunning = false;
     points = [];
     route = null;
     showCompleteGraph = false;
+    showComplexityOverlay = true;
     document.getElementById("startIndex").value = 0;
     setStatus("Reset complete.");
     draw();
@@ -439,6 +906,7 @@
   });
 
   document.getElementById("import").addEventListener("click", () => {
+    if (isRunning) { setStatus("Stop the running solver first."); return; }
     try {
       const obj = JSON.parse(document.getElementById("jsonBox").value.trim());
       if (!Array.isArray(obj.points)) throw new Error("JSON must contain { points: [...] }");
@@ -450,7 +918,7 @@
       }));
 
       route = null;
-      setStatus("Imported points. Create a route with Greedy/Random/Brute Force.");
+      setStatus("Imported points. Create a route with Greedy / Random / Brute Force / Annealing.");
       draw();
     } catch (e) {
       alert("Import failed: " + e.message);
