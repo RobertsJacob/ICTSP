@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>TSP Building Route Lab</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+    .panel { min-width: 280px; max-width: 360px; }
+    button, input { padding: 8px 10px; margin: 4px 0; width: 100%; }
+    textarea { width: 100%; height: 160px; }
+    canvas { border: 1px solid #ccc; border-radius: 8px; }
+    small { color: #444; display: block; line-height: 1.35; }
+    .stat { padding: 8px 10px; background: #f5f5f5; border-radius: 8px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h2>TSP: Building Route Solver (Greedy + 2-opt)</h2>
+  <small>
+    Click to add a location. Drag a location to move it. Set a start node, then solve.
+    Distance is pixel-distance on the map (you can scale it later to meters).
+  </small>
+
+  <div class="row">
+    <div>
+      <canvas id="map" width="900" height="600" aria-label="Building map canvas"></canvas>
+    </div>
+
+    <div class="panel">
+      <label>
+        Floorplan image file (default: floorplan.png)
+        <input id="imgPath" value="floorplan.png" />
+      </label>
+      <button id="loadImg">Load / Reload floorplan</button>
+
+      <label>
+        Start node index (0-based)
+        <input id="startIndex" type="number" value="0" min="0" />
+      </label>
+
+      <button id="solveGreedy">Solve: Greedy Nearest Neighbor</button>
+      <button id="improve2opt">Improve: 2-opt (10 passes)</button>
+      <button id="clearRoute">Clear Route (keep points)</button>
+      <button id="resetAll">Reset All</button>
+
+      <div class="stat" id="stats">Route: —<br/>Distance: —</div>
+
+      <h3>Export / Import</h3>
+      <button id="export">Export JSON</button>
+      <button id="import">Import JSON</button>
+      <textarea id="jsonBox" placeholder='{"points":[{"name":"A","x":100,"y":120}, ...]}'></textarea>
+
+      <small>
+        Tip: Rename nodes by editing JSON (name field). You can also keep a “district standard”
+        building file and reuse it each semester.
+      </small>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // ---------- State ----------
+  const canvas = document.getElementById("map");
+  const ctx = canvas.getContext("2d");
+  const img = new Image();
+  let points = []; // {name, x, y}
+  let route = null; // array of indices e.g. [0,3,2,1,0]
+  let draggingIndex = -1;
+
+  // ---------- Helpers ----------
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+  function routeLength(routeIdxs) {
+    if (!routeIdxs || routeIdxs.length < 2) return 0;
+    let total = 0;
+    for (let i = 0; i < routeIdxs.length - 1; i++) {
+      total += dist(points[routeIdxs[i]], points[routeIdxs[i+1]]);
+    }
+    return total;
+  }
+
+  function clampStartIndex() {
+    const input = document.getElementById("startIndex");
+    const n = points.length;
+    if (n === 0) { input.value = 0; return 0; }
+    let v = parseInt(input.value, 10);
+    if (Number.isNaN(v)) v = 0;
+    v = Math.max(0, Math.min(n - 1, v));
+    input.value = v;
+    return v;
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Background
+    if (img.complete && img.naturalWidth) {
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    } else {
+      // fallback background
+      ctx.fillStyle = "#fafafa";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#888";
+      ctx.fillText("No floorplan loaded (set image path and click Load)", 16, 24);
+    }
+
+    // Route lines
+    if (route && route.length >= 2) {
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(0,0,0,0.75)";
+      ctx.beginPath();
+      const p0 = points[route[0]];
+      ctx.moveTo(p0.x, p0.y);
+      for (let i = 1; i < route.length; i++) {
+        const p = points[route[i]];
+        ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+    }
+
+    // Points
+    const start = clampStartIndex();
+    points.forEach((p, i) => {
+      // node
+      ctx.beginPath();
+      ctx.fillStyle = (i === start) ? "rgba(0,150,0,0.9)" : "rgba(0,90,200,0.9)";
+      ctx.arc(p.x, p.y, 10, 0, Math.PI * 2);
+      ctx.fill();
+
+      // label
+      ctx.fillStyle = "rgba(255,255,255,0.95)";
+      ctx.font = "12px system-ui, Arial";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(String(i), p.x, p.y);
+
+      ctx.fillStyle = "rgba(0,0,0,0.85)";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "alphabetic";
+      ctx.fillText(p.name ?? `Room ${i}`, p.x + 14, p.y - 12);
+    });
+
+    updateStats();
+  }
+
+  function updateStats() {
+    const el = document.getElementById("stats");
+    if (!route) {
+      el.innerHTML = `Route: —<br/>Distance: —`;
+      return;
+    }
+    const names = route.map(i => points[i]?.name ?? `#${i}`).join(" → ");
+    const d = routeLength(route);
+    el.innerHTML = `Route:<br/><small>${names}</small><br/>Distance: ${d.toFixed(1)} px`;
+  }
+
+  function nearestNeighbor(startIdx) {
+    const n = points.length;
+    if (n === 0) return null;
+    const visited = Array(n).fill(false);
+    const r = [startIdx];
+    visited[startIdx] = true;
+
+    for (let step = 1; step < n; step++) {
+      const last = r[r.length - 1];
+      let best = -1;
+      let bestD = Infinity;
+      for (let i = 0; i < n; i++) {
+        if (!visited[i]) {
+          const d = dist(points[last], points[i]);
+          if (d < bestD) { bestD = d; best = i; }
+        }
+      }
+      visited[best] = true;
+      r.push(best);
+    }
+    r.push(startIdx); // return to start
+    return r;
+  }
+
+  // 2-opt improvement for a cycle route
+  function twoOptImprove(r, passes = 10) {
+    if (!r || r.length < 5) return r; // need at least 3 nodes + return
+    let best = r.slice();
+    let bestLen = routeLength(best);
+
+    for (let pass = 0; pass < passes; pass++) {
+      let improved = false;
+      // i and k are edges to swap (avoid first/last because it's a cycle closure)
+      for (let i = 1; i < best.length - 3; i++) {
+        for (let k = i + 1; k < best.length - 2; k++) {
+          const candidate = best.slice();
+          // reverse segment i..k
+          const segment = candidate.slice(i, k + 1).reverse();
+          candidate.splice(i, k - i + 1, ...segment);
+
+          const len = routeLength(candidate);
+          if (len + 1e-9 < bestLen) {
+            best = candidate;
+            bestLen = len;
+            improved = true;
+          }
+        }
+      }
+      if (!improved) break;
+    }
+    return best;
+  }
+
+  // ---------- Events ----------
+  function getMousePos(evt) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (evt.clientX - rect.left) * (canvas.width / rect.width),
+      y: (evt.clientY - rect.top) * (canvas.height / rect.height)
+    };
+  }
+
+  canvas.addEventListener("mousedown", (evt) => {
+    const m = getMousePos(evt);
+    // detect click on node
+    draggingIndex = -1;
+    for (let i = points.length - 1; i >= 0; i--) {
+      if (Math.hypot(points[i].x - m.x, points[i].y - m.y) <= 12) {
+        draggingIndex = i;
+        return;
+      }
+    }
+    // otherwise add point
+    const name = `Location ${points.length}`;
+    points.push({ name, x: m.x, y: m.y });
+    route = null;
+    draw();
+  });
+
+  canvas.addEventListener("mousemove", (evt) => {
+    if (draggingIndex < 0) return;
+    const m = getMousePos(evt);
+    points[draggingIndex].x = m.x;
+    points[draggingIndex].y = m.y;
+    draw();
+  });
+
+  window.addEventListener("mouseup", () => {
+    draggingIndex = -1;
+  });
+
+  document.getElementById("solveGreedy").addEventListener("click", () => {
+    const start = clampStartIndex();
+    route = nearestNeighbor(start);
+    draw();
+  });
+
+  document.getElementById("improve2opt").addEventListener("click", () => {
+    if (!route) return;
+    route = twoOptImprove(route, 10);
+    draw();
+  });
+
+  document.getElementById("clearRoute").addEventListener("click", () => {
+    route = null;
+    draw();
+  });
+
+  document.getElementById("resetAll").addEventListener("click", () => {
+    points = [];
+    route = null;
+    document.getElementById("startIndex").value = 0;
+    draw();
+  });
+
+  document.getElementById("export").addEventListener("click", () => {
+    const payload = { points };
+    document.getElementById("jsonBox").value = JSON.stringify(payload, null, 2);
+  });
+
+  document.getElementById("import").addEventListener("click", () => {
+    try {
+      const txt = document.getElementById("jsonBox").value.trim();
+      const obj = JSON.parse(txt);
+      if (!obj.points || !Array.isArray(obj.points)) throw new Error("JSON must contain { points: [...] }");
+      points = obj.points.map((p, i) => ({
+        name: String(p.name ?? `Location ${i}`),
+        x: Number(p.x),
+        y: Number(p.y)
+      }));
+      route = null;
+      draw();
+    } catch (e) {
+      alert("Import failed: " + e.message);
+    }
+  });
+
+  // image load
+  document.getElementById("loadImg").addEventListener("click", () => {
+    const path = document.getElementById("imgPath").value.trim() || "floorplan.png";
+    img.src = path + (path.includes("?") ? "&" : "?") + "v=" + Date.now();
+  });
+  img.onload = () => draw();
+  img.onerror = () => draw();
+
+  // initial draw
+  img.src = "floorplan.png";
+  draw();
+})();
+</script>
+</body>
+</html>
