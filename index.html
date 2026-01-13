@@ -19,7 +19,7 @@
   <h2>TSP: Building Route Solver (Greedy + 2-opt)</h2>
   <small>
     Click to add a location. Drag a location to move it. Set a start node, then solve.
-    Distance is pixel-distance on the map (you can scale it later to meters).
+    Distances are computed in pixels and converted to miles using a calibrated scale.
   </small>
 
   <div class="row">
@@ -60,6 +60,10 @@
 
 <script>
 (() => {
+  // ---------- Calibration ----------
+  // 1882.1 px corresponds to 49.9 miles (known reference route)
+  const MILES_PER_PIXEL = 49.9 / 1882.1;
+
   // ---------- State ----------
   const canvas = document.getElementById("map");
   const ctx = canvas.getContext("2d");
@@ -94,18 +98,15 @@
   function draw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Background
     if (img.complete && img.naturalWidth) {
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     } else {
-      // fallback background
       ctx.fillStyle = "#fafafa";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.fillStyle = "#888";
       ctx.fillText("No floorplan loaded (set image path and click Load)", 16, 24);
     }
 
-    // Route lines
     if (route && route.length >= 2) {
       ctx.lineWidth = 3;
       ctx.strokeStyle = "rgba(0,0,0,0.75)";
@@ -119,16 +120,13 @@
       ctx.stroke();
     }
 
-    // Points
     const start = clampStartIndex();
     points.forEach((p, i) => {
-      // node
       ctx.beginPath();
       ctx.fillStyle = (i === start) ? "rgba(0,150,0,0.9)" : "rgba(0,90,200,0.9)";
       ctx.arc(p.x, p.y, 10, 0, Math.PI * 2);
       ctx.fill();
 
-      // label
       ctx.fillStyle = "rgba(255,255,255,0.95)";
       ctx.font = "12px system-ui, Arial";
       ctx.textAlign = "center";
@@ -150,9 +148,17 @@
       el.innerHTML = `Route: —<br/>Distance: —`;
       return;
     }
+
     const names = route.map(i => points[i]?.name ?? `#${i}`).join(" → ");
-    const d = routeLength(route);
-    el.innerHTML = `Route:<br/><small>${names}</small><br/>Distance: ${d.toFixed(1)} px`;
+    const pxDistance = routeLength(route);
+    const miles = pxDistance * MILES_PER_PIXEL;
+
+    el.innerHTML = `
+      Route:<br/>
+      <small>${names}</small><br/>
+      Distance: <strong>${miles.toFixed(2)} miles</strong>
+      <br/><small>(${pxDistance.toFixed(1)} px)</small>
+    `;
   }
 
   function nearestNeighbor(startIdx) {
@@ -175,28 +181,25 @@
       visited[best] = true;
       r.push(best);
     }
-    r.push(startIdx); // return to start
+    r.push(startIdx);
     return r;
   }
 
-  // 2-opt improvement for a cycle route
   function twoOptImprove(r, passes = 10) {
-    if (!r || r.length < 5) return r; // need at least 3 nodes + return
+    if (!r || r.length < 5) return r;
     let best = r.slice();
     let bestLen = routeLength(best);
 
     for (let pass = 0; pass < passes; pass++) {
       let improved = false;
-      // i and k are edges to swap (avoid first/last because it's a cycle closure)
       for (let i = 1; i < best.length - 3; i++) {
         for (let k = i + 1; k < best.length - 2; k++) {
           const candidate = best.slice();
-          // reverse segment i..k
           const segment = candidate.slice(i, k + 1).reverse();
           candidate.splice(i, k - i + 1, ...segment);
 
           const len = routeLength(candidate);
-          if (len + 1e-9 < bestLen) {
+          if (len < bestLen) {
             best = candidate;
             bestLen = len;
             improved = true;
@@ -208,7 +211,6 @@
     return best;
   }
 
-  // ---------- Events ----------
   function getMousePos(evt) {
     const rect = canvas.getBoundingClientRect();
     return {
@@ -219,7 +221,6 @@
 
   canvas.addEventListener("mousedown", (evt) => {
     const m = getMousePos(evt);
-    // detect click on node
     draggingIndex = -1;
     for (let i = points.length - 1; i >= 0; i--) {
       if (Math.hypot(points[i].x - m.x, points[i].y - m.y) <= 12) {
@@ -227,9 +228,7 @@
         return;
       }
     }
-    // otherwise add point
-    const name = `Location ${points.length}`;
-    points.push({ name, x: m.x, y: m.y });
+    points.push({ name: `Location ${points.length}`, x: m.x, y: m.y });
     route = null;
     draw();
   });
@@ -242,13 +241,10 @@
     draw();
   });
 
-  window.addEventListener("mouseup", () => {
-    draggingIndex = -1;
-  });
+  window.addEventListener("mouseup", () => draggingIndex = -1);
 
   document.getElementById("solveGreedy").addEventListener("click", () => {
-    const start = clampStartIndex();
-    route = nearestNeighbor(start);
+    route = nearestNeighbor(clampStartIndex());
     draw();
   });
 
@@ -271,15 +267,13 @@
   });
 
   document.getElementById("export").addEventListener("click", () => {
-    const payload = { points };
-    document.getElementById("jsonBox").value = JSON.stringify(payload, null, 2);
+    document.getElementById("jsonBox").value = JSON.stringify({ points }, null, 2);
   });
 
   document.getElementById("import").addEventListener("click", () => {
     try {
-      const txt = document.getElementById("jsonBox").value.trim();
-      const obj = JSON.parse(txt);
-      if (!obj.points || !Array.isArray(obj.points)) throw new Error("JSON must contain { points: [...] }");
+      const obj = JSON.parse(document.getElementById("jsonBox").value.trim());
+      if (!Array.isArray(obj.points)) throw new Error("Invalid JSON");
       points = obj.points.map((p, i) => ({
         name: String(p.name ?? `Location ${i}`),
         x: Number(p.x),
@@ -292,15 +286,13 @@
     }
   });
 
-  // image load
   document.getElementById("loadImg").addEventListener("click", () => {
     const path = document.getElementById("imgPath").value.trim() || "SVVSDMap.png";
     img.src = path + (path.includes("?") ? "&" : "?") + "v=" + Date.now();
   });
+
   img.onload = () => draw();
   img.onerror = () => draw();
-
-  // initial draw
   img.src = "SVVSDMap.png";
   draw();
 })();
