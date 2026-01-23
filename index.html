@@ -7,7 +7,7 @@
   <style>
     body { font-family: system-ui, Arial, sans-serif; margin: 16px; }
     .row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
-    .panel { min-width: 320px; max-width: 420px; }
+    .panel { min-width: 320px; max-width: 440px; }
     button, input { padding: 8px 10px; margin: 4px 0; width: 100%; box-sizing: border-box; }
     textarea { width: 100%; height: 160px; box-sizing: border-box; }
     canvas { border: 1px solid #ccc; border-radius: 8px; }
@@ -25,7 +25,7 @@
   <h2>TSP: Dramatic Classical vs Quantum-Inspired Demo</h2>
   <small>
     Click to add a location. Drag to move it. Set a start node.
-    Use the dramatic demo buttons to visualize why the Traveling Salesperson Problem becomes hard.
+    The complexity overlay focuses on <b>routes/tours</b> (factorial explosion), not just edges (quadratic).
   </small>
 
   <div class="row">
@@ -50,10 +50,13 @@
         <button id="toggleComplexity">Toggle: Show route complexity</button>
       </div>
 
-      <div class="sectionTitle">Dramatic Demos (no instant mode)</div>
+      <div class="sectionTitle">Dramatic Demos</div>
 
-      <button id="runClassical">Run Classical Exploration (Dramatic)</button>
-      <button id="runQuantum">Run Quantum Speedup Demo (Dramatic)</button>
+      <div class="grid2">
+        <button id="runRandomCuration">Random Route Curation (Dramatic)</button>
+        <button id="runClassical">Classical Demo (Dramatic)</button>
+      </div>
+      <button id="runQuantum">Quantum Speedup Demo (Dramatic)</button>
       <button id="stopRun">Stop / Cancel</button>
 
       <div class="dangerNote">
@@ -68,6 +71,7 @@
 
       <div class="stat" id="stats">Route: —<br/>Distance: —</div>
       <div class="hint" id="statusMsg"></div>
+
       <div class="stat" id="timing">
         <b>Computation time (simulated)</b><br/>
         Classical: —<br/>
@@ -81,7 +85,7 @@
       <textarea id="jsonBox" placeholder='{"points":[{"name":"A","x":100,"y":120}, ...]}'></textarea>
 
       <small class="hint">
-        Teaching move: toggle complexity overlay and add points one-by-one. Students will watch tours explode factorially.
+        Teaching move: add points one-by-one while the complexity overlay is ON.
       </small>
     </div>
   </div>
@@ -89,20 +93,27 @@
 <script>
 (() => {
   // ---------- Calibration ----------
-  // 1882.1 px corresponds to 49.9 miles (known reference route)
   const MILES_PER_PIXEL = 49.9 / 1882.1;
 
-  // ---------- Drama knobs ----------
-  // These are intentionally exaggerated delays/effort for the "feel" of computation.
-  const CLASSICAL_STEP_DELAY_MS = 120;   // slow + visible
-  const CLASSICAL_ROUTE_TEST_DELAY_MS = 40; // per test "attempt" in exploration
-  const QUANTUM_STEP_DELAY_MS = 8;       // fast + punchy
+  // ---------- Timing / Drama knobs ----------
+  // Target: classical demo ~20–40 seconds for typical classroom N
+  const GREEDY_STEP_DELAY_MS = 90;      // step-by-step visible, but not forever
+  const CURATION_SHOW_DELAY_MS = 140;   // show a few ugly random routes quickly
 
-  // How many "route tests" the dramatic classical exploration performs.
-  // This is NOT literal (n-1)! unless n is tiny; it's a dramatized sample that scales with complexity.
-  const CLASSICAL_TESTS_PER_POINT = 800; // increase for more drama (also more waiting)
+  // Exploration work:
+  // We do MANY tests, but only redraw occasionally, and we do large batches per "frame"
+  const CLASSICAL_TOTAL_TESTS_BASE = 7000;    // base tests
+  const CLASSICAL_TESTS_PER_POINT = 900;      // scales with n
+  const CLASSICAL_BATCH_SIZE = 400;           // tests per UI update chunk
+  const CLASSICAL_UPDATE_EVERY_CHUNK_MS = 40; // pause between redraws (drama pacing)
 
-  // For tiny n, we can do real brute force (still animated), but we don't rely on it for drama.
+  // Quantum demo: fast & punchy
+  const QUANTUM_VISIBLE_STEPS = 55;
+  const QUANTUM_STEP_DELAY_MS = 10;
+  const QUANTUM_SAMPLES_PER_STEP_BASE = 800; // hidden work per visible step
+  const QUANTUM_SAMPLES_PER_POINT = 260;
+
+  // Optional truth anchor brute force cap
   const REAL_BRUTE_FORCE_MAX_N = 10;
 
   // ---------- State ----------
@@ -110,8 +121,8 @@
   const ctx = canvas.getContext("2d");
   const img = new Image();
 
-  let points = [];         // {name, x, y}
-  let route = null;        // array of indices e.g. [0,3,2,1,0]
+  let points = [];
+  let route = null;
   let draggingIndex = -1;
 
   let showCompleteGraph = false;
@@ -156,7 +167,6 @@
 
   function edgesCount(n) { return (n * (n - 1)) / 2; }
 
-  // Approx tours (fix start): (n-1)! shown in scientific-ish notation (via log10)
   function factorialLog10(k) {
     if (k < 2) return 0;
     let s = 0;
@@ -211,7 +221,7 @@
     const edges = edgesCount(n);
     const tours = formatFactorial(Math.max(0, n - 1));
 
-    const boxX = 14, boxY = 14, boxW = 460, boxH = 92;
+    const boxX = 14, boxY = 14, boxW = 490, boxH = 92;
     ctx.fillStyle = "rgba(255,255,255,0.86)";
     ctx.fillRect(boxX, boxY, boxW, boxH);
     ctx.strokeStyle = "rgba(0,0,0,0.15)";
@@ -222,13 +232,13 @@
     ctx.fillText(`Points (n): ${n}`, boxX + 12, boxY + 24);
 
     ctx.font = "13px system-ui, Arial";
-    ctx.fillText(`Connections (edges): n(n−1)/2 = ${edges.toLocaleString()} (quadratic)`, boxX + 12, boxY + 46);
+    ctx.fillText(`Edges: n(n−1)/2 = ${edges.toLocaleString()} (quadratic)`, boxX + 12, boxY + 46);
 
-    ctx.fillText(`Routes (tours, fix start): (n−1)! ≈ ${tours} (factorial explosion)`, boxX + 12, boxY + 68);
+    ctx.fillText(`Possible routes: (n−1)! ≈ ${tours} (factorial explosion)`, boxX + 12, boxY + 68);
 
     ctx.fillStyle = "rgba(0,0,0,0.58)";
     ctx.font = "12px system-ui, Arial";
-    ctx.fillText(`Edges are not exponential. Routes are factorial (worse than exponential).`, boxX + 12, boxY + 88);
+    ctx.fillText(`The hard part is routes/tours, not edges.`, boxX + 12, boxY + 88);
   }
 
   function draw() {
@@ -304,7 +314,7 @@
       Classical: <span class="mono">${c}</span><br/>
       Quantum: <span class="mono">${q}</span><br/>
       <small class="hint">Wall-clock (your machine): <span class="mono">${w}</span></small>
-      <br/><small class="hint">Note: simulated values are exaggerated for visualization; not real hardware benchmarks.</small>
+      <br/><small class="hint">Simulated values are exaggerated for visualization; not real hardware benchmarks.</small>
     `;
   }
 
@@ -320,7 +330,7 @@
     isRunning = true;
     cancelToken++;
     setStatus(msg || "Running...");
-    // reset timing for each run
+    // reset timing per run
     simulatedClassicalMs = null;
     simulatedQuantumMs = null;
     wallClockMs = null;
@@ -336,51 +346,7 @@
     return token !== cancelToken;
   }
 
-  // ---------- Core building blocks ----------
-  function nearestNeighborStepRoute(startIdx, visited, partial) {
-    const n = points.length;
-    const last = partial[partial.length - 1];
-    let best = -1;
-    let bestD = Infinity;
-    for (let i = 0; i < n; i++) {
-      if (!visited[i]) {
-        const d = dist(points[last], points[i]);
-        if (d < bestD) { bestD = d; best = i; }
-      }
-    }
-    return best;
-  }
-
-  async function greedyAnimated(startIdx, token) {
-    const n = points.length;
-    const visited = Array(n).fill(false);
-    const r = [startIdx];
-    visited[startIdx] = true;
-
-    route = r.slice();
-    updateStats({ mode: "Classical: Greedy (animated)", states: 1 });
-    draw();
-
-    for (let step = 1; step < n; step++) {
-      if (wasCancelled(token)) return null;
-      const best = nearestNeighborStepRoute(startIdx, visited, r);
-      visited[best] = true;
-      r.push(best);
-
-      route = r.slice();
-      updateStats({ mode: "Classical: Greedy (animated)", states: step + 1 });
-      draw();
-
-      await sleep(CLASSICAL_STEP_DELAY_MS);
-    }
-
-    r.push(startIdx);
-    route = r.slice();
-    updateStats({ mode: "Classical: Greedy (animated)", states: n });
-    draw();
-    return r;
-  }
-
+  // ---------- Route tools ----------
   function makeRandomRoute(startIdx) {
     const n = points.length;
     if (n === 0) return null;
@@ -402,12 +368,12 @@
 
     for (let i = 1; i < best.length - 3; i++) {
       for (let k = i + 1; k < best.length - 2; k++) {
-        const candidate = best.slice();
-        const segment = candidate.slice(i, k + 1).reverse();
-        candidate.splice(i, k - i + 1, ...segment);
-        const len = routeLength(candidate);
+        const cand = best.slice();
+        const seg = cand.slice(i, k + 1).reverse();
+        cand.splice(i, k - i + 1, ...seg);
+        const len = routeLength(cand);
         if (len + 1e-9 < bestLen) {
-          best = candidate;
+          best = cand;
           bestLen = len;
         }
       }
@@ -415,59 +381,196 @@
     return best;
   }
 
-  // ---------- Dramatic classical exploration ----------
-  // This is the "watch it grind" phase that makes route complexity visible.
-  // It samples many random routes (and sometimes 2-opt improves them) while updating best-so-far.
-  async function classicalExplorationDramatic(startIdx, token) {
+  async function greedyAnimated(startIdx, token) {
+    const n = points.length;
+    const visited = Array(n).fill(false);
+    const r = [startIdx];
+    visited[startIdx] = true;
+
+    route = r.slice();
+    updateStats({ mode: "Classical: Greedy build", states: 1 });
+    draw();
+    await sleep(GREEDY_STEP_DELAY_MS);
+
+    for (let step = 1; step < n; step++) {
+      if (wasCancelled(token)) return null;
+      const last = r[r.length - 1];
+      let best = -1;
+      let bestD = Infinity;
+
+      for (let i = 0; i < n; i++) {
+        if (!visited[i]) {
+          const d = dist(points[last], points[i]);
+          if (d < bestD) { bestD = d; best = i; }
+        }
+      }
+
+      visited[best] = true;
+      r.push(best);
+
+      route = r.slice();
+      updateStats({ mode: "Classical: Greedy build", states: step + 1 });
+      draw();
+      await sleep(GREEDY_STEP_DELAY_MS);
+    }
+
+    r.push(startIdx);
+    route = r.slice();
+    updateStats({ mode: "Classical: Greedy build", states: n });
+    draw();
+    return r;
+  }
+
+  // ---------- NEW: Random route curation (dramatic baseline) ----------
+  // Shows ugly random routes, keeps a best-so-far, and ends on the best one.
+  async function randomRouteCurationDramatic(startIdx, token, rounds = 16) {
+    if (points.length < 3) return null;
+
+    setStatus("Random route curation: generating messy routes and keeping the best-so-far...");
+
+    let best = null;
+    let bestLen = Infinity;
+
+    for (let i = 1; i <= rounds; i++) {
+      if (wasCancelled(token)) return null;
+
+      const cand = makeRandomRoute(startIdx);
+      route = cand; // show the messy one on purpose
+      updateStats({ mode: "Random curation (candidate)", states: i });
+      draw();
+      await sleep(CURATION_SHOW_DELAY_MS);
+
+      const len = routeLength(cand);
+      if (len < bestLen) {
+        best = cand;
+        bestLen = len;
+      }
+    }
+
+    // End on the best random found
+    route = best;
+    updateStats({ mode: "Random curation (best found)", states: rounds });
+    draw();
+    setStatus("Random route curation complete: best random route shown.");
+    return best;
+  }
+
+  // ---------- Classical exploration (monotonic best-only) ----------
+  // Key fix: we NEVER draw worse routes once a best exists.
+  async function classicalExplorationMonotonic(startIdx, token) {
     const n = points.length;
     if (n < 3) return;
 
-    const toursApprox = formatFactorial(Math.max(0, n - 1));
-    const testsTarget = Math.max(600, n * CLASSICAL_TESTS_PER_POINT); // scales with n
-    setStatus(`Classical exploration: sampling routes (dramatic). Tours explode to ~${toursApprox}. Testing ${testsTarget.toLocaleString()} candidate routes...`);
+    const testsTarget = Math.max(CLASSICAL_TOTAL_TESTS_BASE, n * CLASSICAL_TESTS_PER_POINT);
 
-    let best = makeRandomRoute(startIdx);
+    setStatus(
+      `Classical improvement: testing many candidate routes (best-so-far only). ` +
+      `This is a dramatized “exploration” stand-in for brute force. Candidates: ${testsTarget.toLocaleString()}.`
+    );
+
+    // Start from current route (greedy) if present, otherwise best random
+    let best = route ? route.slice() : makeRandomRoute(startIdx);
     let bestLen = routeLength(best);
 
     let tested = 0;
 
-    // batch processing for responsiveness
-    const BATCH = 60;
-
     while (tested < testsTarget) {
       if (wasCancelled(token)) return;
 
-      for (let b = 0; b < BATCH && tested < testsTarget; b++) {
+      // do a big batch quickly
+      for (let b = 0; b < CLASSICAL_BATCH_SIZE && tested < testsTarget; b++) {
         tested++;
 
-        // generate a candidate route and occasionally apply one 2-opt improvement
+        // make candidate by random + occasional 2-opt polishing
         let cand = makeRandomRoute(startIdx);
-        if (Math.random() < 0.35) cand = twoOptImproveOnce(cand);
+        if (Math.random() < 0.55) cand = twoOptImproveOnce(cand);
 
         const candLen = routeLength(cand);
         if (candLen < bestLen) {
           best = cand;
           bestLen = candLen;
-          route = best.slice();
         }
       }
 
-      // Update visuals periodically (so students see movement)
+      // show only best-so-far (monotonic)
       route = best.slice();
-      updateStats({ mode: "Classical: Exploration (dramatic)", states: tested });
+      updateStats({ mode: "Classical: Best-so-far exploration", states: tested });
       draw();
 
-      // Dramatic pause
-      await sleep(CLASSICAL_ROUTE_TEST_DELAY_MS);
+      // small pacing delay so it feels like computation
+      await sleep(CLASSICAL_UPDATE_EVERY_CHUNK_MS);
     }
 
     route = best.slice();
-    updateStats({ mode: "Classical: Exploration (dramatic)", states: tested });
+    updateStats({ mode: "Classical: Best-so-far exploration", states: tested });
     draw();
+    setStatus("Classical improvement complete (best-so-far displayed).");
   }
 
-  // ---------- Optional real brute force (tiny N) ----------
-  // Kept as "truth anchor" when n <= 10, but not required for the dramatic story.
+  // ---------- Quantum demo (fast improvement, best-only) ----------
+  function proposeSwap(current) {
+    const len = current.length;
+    if (len <= 4) return current.slice();
+    const i = 1 + Math.floor(Math.random() * (len - 2));
+    let k = 1 + Math.floor(Math.random() * (len - 2));
+    while (k === i) k = 1 + Math.floor(Math.random() * (len - 2));
+    const next = current.slice();
+    [next[i], next[k]] = [next[k], next[i]];
+    return next;
+  }
+
+  async function quantumSpeedupDramatic(startIdx, token) {
+    const n = points.length;
+    if (n < 3) return;
+
+    const hiddenSamplesPerStep = Math.max(QUANTUM_SAMPLES_PER_STEP_BASE, n * QUANTUM_SAMPLES_PER_POINT);
+    const totalHidden = QUANTUM_VISIBLE_STEPS * hiddenSamplesPerStep;
+
+    setStatus(
+      `Quantum speedup demo (simulated): lots of hidden sampling per step, fast best-route improvements. ` +
+      `Hidden samples/step: ${hiddenSamplesPerStep.toLocaleString()}.`
+    );
+
+    let best = route ? route.slice() : makeRandomRoute(startIdx);
+    let bestLen = routeLength(best);
+
+    let T = 55; // fast-cooling for drama
+
+    for (let step = 1; step <= QUANTUM_VISIBLE_STEPS; step++) {
+      if (wasCancelled(token)) return;
+
+      for (let s = 0; s < hiddenSamplesPerStep; s++) {
+        let cand = proposeSwap(best);
+        if (Math.random() < 0.12) cand = twoOptImproveOnce(cand); // occasional “jump”
+
+        const candLen = routeLength(cand);
+        const delta = candLen - bestLen;
+
+        // Accept exploration sometimes, but we only keep if better (best-only display)
+        if (delta <= 0 || Math.random() < Math.exp(-delta / Math.max(1e-9, T))) {
+          if (candLen < bestLen) {
+            best = cand;
+            bestLen = candLen;
+          }
+        }
+      }
+
+      T *= 0.90;
+
+      route = best.slice();
+      updateStats({ mode: "Quantum demo (simulated)", states: step * hiddenSamplesPerStep });
+      draw();
+
+      await sleep(QUANTUM_STEP_DELAY_MS);
+    }
+
+    route = best.slice();
+    updateStats({ mode: "Quantum demo (simulated)", states: totalHidden });
+    draw();
+    setStatus("Quantum demo complete: best-so-far shown.");
+  }
+
+  // ---------- Truth anchor brute force (tiny n) ----------
   function* heapPermutations(arr) {
     const a = arr.slice();
     const n = a.length;
@@ -488,25 +591,20 @@
     }
   }
 
-  async function bruteForceAnimatedTiny(startIdx, token) {
+  async function bruteForceTinyBestOnly(startIdx, token) {
     const n = points.length;
-    if (n < 2) return;
-    if (n > REAL_BRUTE_FORCE_MAX_N) return; // not running real brute force for big n
+    if (n > REAL_BRUTE_FORCE_MAX_N || n < 2) return;
 
     const nodes = [];
     for (let i = 0; i < n; i++) if (i !== startIdx) nodes.push(i);
-
-    let total = 1;
-    for (let i = 2; i <= (n - 1); i++) total *= i;
-
-    setStatus(`(Truth anchor) Brute force: evaluating ${(n-1)}! = ${formatFactorial(n-1)} tours (animated)...`);
 
     let best = null;
     let bestLen = Infinity;
     let tested = 0;
 
     const gen = heapPermutations(nodes);
-    const BATCH = 200;
+    const BATCH = 250;
+    setStatus(`(Truth anchor) brute force for tiny n: evaluating ${(n-1)}! = ${formatFactorial(n-1)} tours...`);
 
     while (true) {
       if (wasCancelled(token)) return;
@@ -515,131 +613,85 @@
         const nx = gen.next();
         if (nx.done) {
           route = best;
-          updateStats({ mode: "Classical: Brute Force (tiny n)", states: tested });
+          updateStats({ mode: "Truth anchor: brute force (tiny n)", states: tested });
           draw();
+          setStatus("(Truth anchor) brute force complete: optimal route shown.");
           return;
         }
 
         tested++;
-        const perm = nx.value;
-        const cand = [startIdx, ...perm, startIdx];
+        const cand = [startIdx, ...nx.value, startIdx];
         const len = routeLength(cand);
         if (len < bestLen) {
           bestLen = len;
           best = cand;
-          route = best.slice();
         }
       }
 
-      updateStats({ mode: "Classical: Brute Force (tiny n)", states: tested });
+      route = best;
+      updateStats({ mode: "Truth anchor: brute force (tiny n)", states: tested });
       draw();
-      await sleep(CLASSICAL_ROUTE_TEST_DELAY_MS);
-      if (tested >= total) break;
+      await sleep(35);
     }
   }
 
-  // ---------- Quantum-inspired dramatic demo ----------
-  // This is "sampling + energy bias" (annealing-ish) but with very fast, dramatic improvement steps.
-  function proposeSwap(current) {
-    const len = current.length;
-    if (len <= 4) return current.slice();
-    const i = 1 + Math.floor(Math.random() * (len - 2));
-    let k = 1 + Math.floor(Math.random() * (len - 2));
-    while (k === i) k = 1 + Math.floor(Math.random() * (len - 2));
-    const next = current.slice();
-    [next[i], next[k]] = [next[k], next[i]];
-    return next;
-  }
+  // ---------- Orchestrators ----------
+  async function runRandomCuration() {
+    if (!ensureNotRunning()) return;
+    if (points.length < 3) { setStatus("Add at least 3 points for random curation to be meaningful."); return; }
 
-  async function quantumSpeedupDramatic(startIdx, token) {
-    const n = points.length;
-    if (n < 3) return;
+    const token = beginRun("Random route curation starting...");
+    const startWall = performance.now();
 
-    // "Quantum demo" does far fewer visible steps, but each step represents many hidden samples.
-    // This is intentionally theatrical.
-    const visibleSteps = 60;
-    const hiddenSamplesPerStep = Math.max(200, n * 250); // increases with n
-    const totalHiddenSamples = visibleSteps * hiddenSamplesPerStep;
+    // simulated time: rounds * delay
+    const rounds = 16;
+    simulatedClassicalMs = rounds * CURATION_SHOW_DELAY_MS;
+    simulatedQuantumMs = null;
 
-    setStatus(`Quantum speedup demo (simulated): sampling many routes per step (dramatic). Visible steps: ${visibleSteps}, hidden samples/step: ${hiddenSamplesPerStep.toLocaleString()}.`);
+    await randomRouteCurationDramatic(clampStartIndex(), token, rounds);
+    if (wasCancelled(token)) return;
 
-    let best = makeRandomRoute(startIdx);
-    let bestLen = routeLength(best);
-
-    // "temperature" effect for early exploration
-    let T = 50;
-
-    for (let step = 1; step <= visibleSteps; step++) {
-      if (wasCancelled(token)) return;
-
-      // In each visible step, do a lot of hidden sampling quickly.
-      // We bias acceptance to mimic energy-based search.
-      for (let s = 0; s < hiddenSamplesPerStep; s++) {
-        let cand = proposeSwap(best);
-        // occasional 2-opt "kick" to create dramatic improvements
-        if (Math.random() < 0.10) cand = twoOptImproveOnce(cand);
-
-        const candLen = routeLength(cand);
-        const delta = candLen - bestLen;
-
-        // accept improvements or sometimes accept worse early (but since we keep "best" display, it feels fast)
-        if (delta <= 0 || Math.random() < Math.exp(-delta / Math.max(1e-9, T))) {
-          // Only update "best" if actually better (keeps the demo moving toward improvement)
-          if (candLen < bestLen) {
-            best = cand;
-            bestLen = candLen;
-          }
-        }
-      }
-
-      T *= 0.92; // cool quickly for drama
-
-      route = best.slice();
-      updateStats({ mode: "Quantum demo (simulated)", states: step * hiddenSamplesPerStep });
-      draw();
-
-      await sleep(QUANTUM_STEP_DELAY_MS);
-    }
-
-    route = best.slice();
-    updateStats({ mode: "Quantum demo (simulated)", states: totalHiddenSamples });
+    wallClockMs = performance.now() - startWall;
+    endRun("Random route curation complete.");
     draw();
   }
 
-  // ---------- Orchestrators: the two big demo buttons ----------
   async function runClassicalDemo() {
     if (!ensureNotRunning()) return;
     if (points.length < 2) { setStatus("Add at least 2 points first."); return; }
 
     const token = beginRun("Classical demo starting...");
     const startWall = performance.now();
-
     const n = points.length;
-    const tours = formatFactorial(Math.max(0, n - 1));
 
-    // Simulated time: Greedy steps + route tests
-    const greedySim = Math.max(1, n) * CLASSICAL_STEP_DELAY_MS;
-    const testsTarget = Math.max(600, n * CLASSICAL_TESTS_PER_POINT);
-    const exploreSim = testsTarget * CLASSICAL_ROUTE_TEST_DELAY_MS;
-    simulatedClassicalMs = greedySim + exploreSim;
+    // Estimate simulated classical time:
+    const testsTarget = Math.max(CLASSICAL_TOTAL_TESTS_BASE, n * CLASSICAL_TESTS_PER_POINT);
+    simulatedClassicalMs =
+      (Math.max(1, n) * GREEDY_STEP_DELAY_MS) +
+      (Math.ceil(testsTarget / CLASSICAL_BATCH_SIZE) * CLASSICAL_UPDATE_EVERY_CHUNK_MS) +
+      (16 * CURATION_SHOW_DELAY_MS);
 
-    // Quantum simulated time blank until quantum run
     simulatedQuantumMs = null;
 
-    setStatus(`Classical demo: building a route greedily, then grinding through exploration. Routes grow to ~${tours}.`);
+    // 1) show random baseline curation (so students see "bad" first)
+    await randomRouteCurationDramatic(clampStartIndex(), token, 16);
+    if (wasCancelled(token)) return;
+
+    // 2) greedy build
+    setStatus("Classical demo: Greedy builds a reasonable route quickly (but not always best).");
     await greedyAnimated(clampStartIndex(), token);
     if (wasCancelled(token)) return;
 
-    await classicalExplorationDramatic(clampStartIndex(), token);
+    // 3) best-only exploration (monotonic)
+    await classicalExplorationMonotonic(clampStartIndex(), token);
     if (wasCancelled(token)) return;
 
-    // truth anchor brute force if tiny n
+    // optional truth anchor for tiny n
     if (points.length <= REAL_BRUTE_FORCE_MAX_N) {
-      setStatus("Bonus truth anchor: brute force (tiny n) to show optimal best-so-far...");
-      await bruteForceAnimatedTiny(clampStartIndex(), token);
+      await bruteForceTinyBestOnly(clampStartIndex(), token);
       if (wasCancelled(token)) return;
     } else {
-      setStatus(`Truth anchor skipped: real brute force is only practical for n ≤ ${REAL_BRUTE_FORCE_MAX_N}.`);
+      setStatus(`Classical demo complete. (Truth anchor skipped: brute force only feasible for n ≤ ${REAL_BRUTE_FORCE_MAX_N}.)`);
     }
 
     wallClockMs = performance.now() - startWall;
@@ -653,32 +705,35 @@
 
     const token = beginRun("Quantum demo starting...");
     const startWall = performance.now();
-
-    // Simulated time: much smaller (dramatic speedup)
-    // We define it from visible steps and quantum delay
     const n = points.length;
-    const visibleSteps = 60;
-    const hiddenSamplesPerStep = Math.max(200, n * 250);
 
-    simulatedQuantumMs = visibleSteps * QUANTUM_STEP_DELAY_MS;
-    // If classical sim is not set (running quantum first), we still want a comparable classical estimate:
+    // Ensure classical estimate exists for comparison
     if (simulatedClassicalMs == null) {
-      const greedySim = Math.max(1, n) * CLASSICAL_STEP_DELAY_MS;
-      const testsTarget = Math.max(600, n * CLASSICAL_TESTS_PER_POINT);
-      const exploreSim = testsTarget * CLASSICAL_ROUTE_TEST_DELAY_MS;
-      simulatedClassicalMs = greedySim + exploreSim;
+      const testsTarget = Math.max(CLASSICAL_TOTAL_TESTS_BASE, n * CLASSICAL_TESTS_PER_POINT);
+      simulatedClassicalMs =
+        (Math.max(1, n) * GREEDY_STEP_DELAY_MS) +
+        (Math.ceil(testsTarget / CLASSICAL_BATCH_SIZE) * CLASSICAL_UPDATE_EVERY_CHUNK_MS) +
+        (16 * CURATION_SHOW_DELAY_MS);
     }
 
-    setStatus("Quantum demo: showing a fast, dramatic ‘sampling toward low energy’ visualization.");
+    // Simulated quantum time: visible steps * delay
+    simulatedQuantumMs = QUANTUM_VISIBLE_STEPS * QUANTUM_STEP_DELAY_MS;
+
+    // Start from a random baseline quickly (no long curation here—quantum is “fast”)
+    route = makeRandomRoute(clampStartIndex());
+    updateStats({ mode: "Quantum demo (starting point)" });
+    draw();
+    await sleep(120);
+
     await quantumSpeedupDramatic(clampStartIndex(), token);
     if (wasCancelled(token)) return;
 
     wallClockMs = performance.now() - startWall;
-    endRun(`Quantum demo complete. (Simulated hidden samples: ${(visibleSteps * hiddenSamplesPerStep).toLocaleString()})`);
+    endRun("Quantum demo complete.");
     draw();
   }
 
-  // ---------- Events ----------
+  // ---------- Canvas interaction ----------
   function getMousePos(evt) {
     const rect = canvas.getBoundingClientRect();
     return {
@@ -689,7 +744,6 @@
 
   canvas.addEventListener("mousedown", (evt) => {
     const m = getMousePos(evt);
-
     draggingIndex = -1;
     for (let i = points.length - 1; i >= 0; i--) {
       if (Math.hypot(points[i].x - m.x, points[i].y - m.y) <= 12) {
@@ -697,7 +751,6 @@
         return;
       }
     }
-
     points.push({ name: `Location ${points.length}`, x: m.x, y: m.y });
     route = null;
     setStatus("");
@@ -714,6 +767,7 @@
 
   window.addEventListener("mouseup", () => draggingIndex = -1);
 
+  // ---------- Buttons ----------
   document.getElementById("toggleGraph").addEventListener("click", () => {
     showCompleteGraph = !showCompleteGraph;
     const n = points.length;
@@ -730,14 +784,12 @@
     draw();
   });
 
+  document.getElementById("runRandomCuration").addEventListener("click", runRandomCuration);
   document.getElementById("runClassical").addEventListener("click", runClassicalDemo);
   document.getElementById("runQuantum").addEventListener("click", runQuantumDemo);
 
   document.getElementById("stopRun").addEventListener("click", () => {
-    if (!isRunning) {
-      setStatus("Nothing is currently running.");
-      return;
-    }
+    if (!isRunning) { setStatus("Nothing is currently running."); return; }
     cancelToken++;
     isRunning = false;
     setStatus("Cancelled. (You can run another demo now.)");
@@ -765,6 +817,7 @@
     draw();
   });
 
+  // export/import
   document.getElementById("export").addEventListener("click", () => {
     document.getElementById("jsonBox").value = JSON.stringify({ points }, null, 2);
     setStatus("Exported points to JSON box.");
@@ -775,21 +828,20 @@
     try {
       const obj = JSON.parse(document.getElementById("jsonBox").value.trim());
       if (!Array.isArray(obj.points)) throw new Error("JSON must contain { points: [...] }");
-
       points = obj.points.map((p, i) => ({
         name: String(p.name ?? `Location ${i}`),
         x: Number(p.x),
         y: Number(p.y)
       }));
-
       route = null;
-      setStatus("Imported points. Run Classical or Quantum demo.");
+      setStatus("Imported points. Run a demo.");
       draw();
     } catch (e) {
       alert("Import failed: " + e.message);
     }
   });
 
+  // image load
   document.getElementById("loadImg").addEventListener("click", () => {
     const path = document.getElementById("imgPath").value.trim() || "SVVSDMap.png";
     img.src = path + (path.includes("?") ? "&" : "?") + "v=" + Date.now();
@@ -799,7 +851,6 @@
   img.onload = () => { setStatus("Floorplan loaded."); draw(); };
   img.onerror = () => { setStatus("Could not load floorplan image. Check filename/case."); draw(); };
 
-  // initial draw
   img.src = "SVVSDMap.png";
   draw();
 })();
